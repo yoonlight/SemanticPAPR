@@ -1,0 +1,6 @@
+matplotlib
+scipy
+wandb
+autopep8
+torchsummary
+torchmetrics
