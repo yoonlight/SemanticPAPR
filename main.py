@@ -1,14 +1,19 @@
+import os
+import random
+
 import torch
 import numpy as np
 import torch.nn as nn
 import torch.nn.functional as F
-
-import torch, time, pdb, os, random, math
-import matplotlib.pyplot as plt
-
-from utils import load_CIFAR10, get_RRC, args_parser, progress_bar
-from resnet import ResNetTx, ResNetRx
+from torch.utils.data import DataLoader
 from scipy.io import savemat
+from torchmetrics.image import PeakSignalNoiseRatio
+
+# from utils import load_CIFAR10, get_RRC, args_parser, progress_bar
+from utils import load_CIFAR10, get_RRC, args_parser
+from resnet import ResNetTx, ResNetRx
+
+os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,2"
 
 # set seeds
 torch.manual_seed(0)
@@ -29,12 +34,12 @@ class SemanticComm(nn.Module):
         fc = 25e6; # carrier frequency
         fb = 10e6; # baseband frequency
         fs = fb * self.args.sps; # sampling rate
-        numSamples = int(256/self.N) * (self.M+self.args.lenCP) * self.args.sps + self.lenRRC * 2 # number of samples 
+        numSamples = int(256/self.N) * (self.M+self.args.lenCP) * self.args.sps + self.lenRRC * 2 # number of samples
         tt = torch.arange(0, numSamples/fs, 1/fs)
-        self.carrier_cos = np.sqrt(2) * torch.cos(2 * np.pi * fc * tt).to(self.args.device)
-        self.carrier_sin = np.sqrt(2) * torch.sin(2 * np.pi * fc * tt).to(self.args.device)
+        self.carrier_cos: torch.Tensor = np.sqrt(2) * torch.cos(2 * np.pi * fc * tt)
+        self.carrier_sin: torch.Tensor = np.sqrt(2) * torch.sin(2 * np.pi * fc * tt)
 
-    def power_norm(self, feature):
+    def power_norm(self, feature) -> torch.Tensor:
         in_shape = feature.shape
         sig_in = feature.reshape(in_shape[0], -1)
         # each pkt in a batch, compute the mean and var
@@ -65,7 +70,8 @@ class SemanticComm(nn.Module):
 
     def channel(self, data_x):
         inputBS, len_data_x = data_x.size(0), data_x.size(1)
-        noise_std = 10 ** (-self.args.snr * 1.0 / 10 / 2)
+        # noise_std = 10 ** (-self.args.snr * 1.0 / 10 / 2)
+        noise_std = np.sqrt(1.0 / (2 * 10 ** (self.args.snr / 10)))
         # real channel
         AWGN = torch.normal(0, std=noise_std, size=(inputBS, len_data_x), requires_grad=False).to(self.args.device)
 
@@ -137,10 +143,13 @@ class SemanticComm(nn.Module):
         data_t_over[:, np.arange(0, len_data_t*self.args.sps, self.args.sps)] = data_t
         # ---------------------------------------------------------- pulse shaping (real in, complex out)
         data_t_over = torch.view_as_real(data_t_over)
-        data_x = self.pulse_filter_complex_sig(data_t_over)
-        # ---------------------------------------------------------- RF signal (real)
-        data_x = data_x.real * self.carrier_cos[:data_x.size(1)] - data_x.imag * self.carrier_sin[:data_x.size(1)]
-        # ---------------------------------------------------------- clipping
+        data_x = self.pulse_filter_complex_sig(data_t_over).cuda()
+        # RF signal (real)
+        carrier_cos = self.carrier_cos.to(data_x.device)
+        carrier_sin = self.carrier_sin.to(data_x.device)
+        data_x = data_x.real * carrier_cos[:data_x.size(1)] \
+            - data_x.imag * carrier_sin[:data_x.size(1)]
+        # clipping
         if self.args.clip != 0.0:
             data_x = self.clip(data_x)
         # ---------------------------------------------------------- compute PAPR
@@ -149,11 +158,14 @@ class SemanticComm(nn.Module):
         # =================================================================================== Channel
         data_r = self.channel(data_x)
 
-        # =================================================================================== demodulation
-        # ---------------------------------------------------------- baseband signal
-        data_r_real = data_r * self.carrier_cos[:data_r.size(1)]
-        data_r_imag = data_r * -self.carrier_sin[:data_r.size(1)]
-        data_r_cpx = torch.cat([data_r_real.unsqueeze(2),data_r_imag.unsqueeze(2)], dim=2)
+        # demodulation
+        # baseband signal
+        carrier_cos = self.carrier_cos.to(data_r.device)
+        carrier_sin = self.carrier_sin.to(data_r.device)
+        data_r_real = data_r * carrier_cos[:data_r.size(1)]
+        data_r_imag = data_r * -carrier_sin[:data_r.size(1)]
+        data_r_cpx = torch.cat(
+            [data_r_real.unsqueeze(2), data_r_imag.unsqueeze(2)], dim=2)
 
         # ---------------------------------------------------------- matched filtering (real in, complex out)
         data_r_filtered = self.pulse_filter_complex_sig(data_r_cpx)
@@ -184,9 +196,8 @@ class SemanticComm(nn.Module):
         return y, PAPRdB, PAPRloss
         
 
-
-def train(epoch, args, model, trainloader, best_PSNR):
-    # ============================================= training
+def train(epoch: int, args, model: nn.Module, trainloader: DataLoader, best_PSNR):
+    # training
     print('\nEpoch: %d' % epoch)
     model.train()
     for batch_idx, (inputs, _) in enumerate(trainloader):
@@ -199,11 +210,13 @@ def train(epoch, args, model, trainloader, best_PSNR):
             loss = args.loss(outputs, inputs) + args.lamb * PAPRloss
         loss.backward()
         args.optimizer.step()
-        progress_bar(batch_idx, len(trainloader), 'bestPSNR: %.2f, MSE: %.4f, PAPRdB: %.4f'%(best_PSNR,loss,PAPRdB.mean()))
+        # progress_bar(batch_idx, len(trainloader), 'bestPSNR: %.2f, MSE: %.4f, PAPRdB: %.4f'%(best_PSNR,loss,PAPRdB.mean()))
+    return loss, PAPRdB, PAPRloss
 
-def test(epoch, args, model, testloader, best_PSNR, saveflag = 1):
+def test(epoch: int, args, model: nn.Module, testloader: DataLoader, best_PSNR, saveflag=1):
     model.eval()
     psnr_all_list = []
+    psnr_metric = PeakSignalNoiseRatio().cuda()
     MSEnoAvg = nn.MSELoss(reduction = 'none')
     with torch.no_grad():
         for batch_idx, (inputs, _) in enumerate(testloader):
@@ -215,14 +228,16 @@ def test(epoch, args, model, testloader, best_PSNR, saveflag = 1):
             PSNR_each_image = 10 * torch.log10(1 / MSE_each_image)
             one_batch_PSNR = PSNR_each_image.data.cpu().numpy()
             psnr_all_list.extend(one_batch_PSNR)
+            psnr_metric.update(outputs, inputs)
             if batch_idx == 0:
                 PAPRdBarray = PAPRdB
             else:
                 PAPRdBarray = torch.cat([PAPRdBarray, PAPRdB],dim=0)
         test_PSNR=np.mean(psnr_all_list)
         test_PSNR=np.around(test_PSNR,5)
-        
+        psnr = psnr_metric.cpu().compute()
         print("test_PSNR, = meanPAPR", (test_PSNR,PAPRdBarray.mean().cpu().numpy()))
+        print(f"torchmetrics PSNR {psnr}")
 
     if saveflag == 1:
         # Save checkpoint.
@@ -259,9 +274,9 @@ def main(model, args):
         # start training
         best_PSNR = 0
         for epoch in np.arange(args.numepoch):
-            train(epoch, args, model, trainloader, best_PSNR)
+            loss, PAPRdB, PAPRloss = train(epoch, args, model, trainloader, best_PSNR)
+            wandb.log({"epoch": epoch + 1, "bestPSNR": best_PSNR, "MSE": loss, "PAPRdB": PAPRdB, "PAPRloss": PAPRloss})
             best_PSNR = test(epoch, args, model, testloader, best_PSNR)
-
             args.scheduler.step()
     else:
         # load a trained model and test
@@ -273,11 +288,14 @@ def main(model, args):
         # pdb.set_trace()
 
 
-
 if __name__ == '__main__':
-    # ======================================================= parse args
+    import wandb
+
+    # ========= parse args
     args = args_parser()
-    args.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    # args.device = 'cuda:2' if torch.cuda.is_available() else 'cpu'
+    # args.device = f'cuda:{args.cuda}'
+    args.device = 'cuda'
     args.loss = nn.MSELoss()
     # ======================================================= Initialize the model
     model = SemanticComm(args).to(args.device)
@@ -294,5 +312,21 @@ if __name__ == '__main__':
     # ======================================================= lr scheduling
     lambdafn = lambda epoch: (1-epoch/args.numepoch)
     args.scheduler = torch.optim.lr_scheduler.LambdaLR(args.optimizer, lr_lambda=lambdafn)
+    wandb.init(
+        # set the wandb project where this run will be logged
+        project="semcom-papr",
+        # track hyperparameters and run metadata
+        config={
+            "learning_rate": args.lr,
+            "snr": args.snr,
+            "epochs": args.numepoch,
+            "lambda": args.lamb,
+            "precoding": args.precoding,
+            "mapping": args.mapping,
+            "clip": args.clip,
+            "fading": args.fading,
+        }
+    )
 
     main(model, args)
+    wandb.finish()
