@@ -1,10 +1,14 @@
-import argparse, os, pdb, sys, time, math
+import argparse
+import time
+import sys
+import os
+
 import torch
-import torch.nn as nn
-import torch.nn.init as init
 import scipy.io as sio
 import torchvision
 import torchvision.transforms as transforms
+from torch.utils.data import DataLoader
+
 
 def load_CIFAR10(BatchSize):
     # Data
@@ -20,14 +24,15 @@ def load_CIFAR10(BatchSize):
 
     trainset = torchvision.datasets.CIFAR10(
         root='./data', train=True, download=True, transform=transform_train)
-    trainloader = torch.utils.data.DataLoader(
+    trainloader = DataLoader(
         trainset, batch_size=BatchSize, shuffle=True, num_workers=2)
 
     testset = torchvision.datasets.CIFAR10(
         root='./data', train=False, download=True, transform=transform_test)
-    testloader = torch.utils.data.DataLoader(
+    testloader = DataLoader(
         testset, batch_size=1000, shuffle=False, num_workers=2)
     return trainloader, testloader
+
 
 def get_RRC():
     # args.sps = 10, roll-off factor = 0.5
@@ -55,66 +60,71 @@ def args_parser():
     parser.add_argument('--BatchSize', type=int, default= 256)
     parser.add_argument('--snr', type=float, default= 10.)
 
-    parser.add_argument('--lr', type=float, default= 1e-3, help = "learning rate")
-    parser.add_argument('--wd', type=float, default= 0.005, help = "weight decay")
-    parser.add_argument('--adamW', type=int, default=1, help="use adamW or not")
-    parser.add_argument('--numepoch', type=int, default=100, help="total number of epochs")
-    parser.add_argument('--load', type=int, default= 0, help = 'load trained model')
+    parser.add_argument('--lr', type=float, default=1e-3, help="learning rate")
+    parser.add_argument('--wd', type=float, default=0.005, help="weight decay")
+    parser.add_argument('--adamW', type=int, default=1,
+                        help="use adamW or not")
+    parser.add_argument('--numepoch', type=int, default=100,
+                        help="total number of epochs")
+    parser.add_argument('--load', type=int, default=0,
+                        help='load trained model')
+    parser.add_argument('--cuda', type=int, default=0,
+                        help='gpu cuda device')
 
     args = parser.parse_args()
     return args
 
 
 
-_, term_width = os.popen('stty size', 'r').read().split()
-term_width = int(term_width)
+# _, term_width = os.popen('stty size', 'r').read().split()
+# term_width = int(term_width)
 
-TOTAL_BAR_LENGTH = 25.
-last_time = time.time()
-begin_time = last_time
+# TOTAL_BAR_LENGTH = 25.
+# last_time = time.time()
+# begin_time = last_time
 
-def progress_bar(current, total, msg=None):
-    global last_time, begin_time
-    if current == 0:
-        begin_time = time.time()  # Reset for new bar.
+# def progress_bar(current, total, msg=None):
+#     global last_time, begin_time
+#     if current == 0:
+#         begin_time = time.time()  # Reset for new bar.
 
-    cur_len = int(TOTAL_BAR_LENGTH*current/total)
-    rest_len = int(TOTAL_BAR_LENGTH - cur_len) - 1
+#     cur_len = int(TOTAL_BAR_LENGTH*current/total)
+#     rest_len = int(TOTAL_BAR_LENGTH - cur_len) - 1
 
-    sys.stdout.write(' [')
-    for i in range(cur_len):
-        sys.stdout.write('=')
-    sys.stdout.write('>')
-    for i in range(rest_len):
-        sys.stdout.write('.')
-    sys.stdout.write(']')
+#     sys.stdout.write(' [')
+#     for i in range(cur_len):
+#         sys.stdout.write('=')
+#     sys.stdout.write('>')
+#     for i in range(rest_len):
+#         sys.stdout.write('.')
+#     sys.stdout.write(']')
 
-    cur_time = time.time()
-    step_time = cur_time - last_time
-    last_time = cur_time
-    tot_time = cur_time - begin_time
+#     cur_time = time.time()
+#     step_time = cur_time - last_time
+#     last_time = cur_time
+#     tot_time = cur_time - begin_time
 
-    L = []
-    L.append('  Step: %s' % format_time(step_time))
-    L.append(' | Tot: %s' % format_time(tot_time))
-    if msg:
-        L.append(' | ' + msg)
+#     L = []
+#     L.append('  Step: %s' % format_time(step_time))
+#     L.append(' | Tot: %s' % format_time(tot_time))
+#     if msg:
+#         L.append(' | ' + msg)
 
-    msg = ''.join(L)
-    sys.stdout.write(msg)
-    for i in range(term_width-int(TOTAL_BAR_LENGTH)-len(msg)-3):
-        sys.stdout.write(' ')
+#     msg = ''.join(L)
+#     sys.stdout.write(msg)
+#     for i in range(term_width-int(TOTAL_BAR_LENGTH)-len(msg)-3):
+#         sys.stdout.write(' ')
 
-    # Go back to the center of the bar.
-    for i in range(term_width-int(TOTAL_BAR_LENGTH/2)+2):
-        sys.stdout.write('\b')
-    sys.stdout.write(' %d/%d ' % (current+1, total))
+#     # Go back to the center of the bar.
+#     for i in range(term_width-int(TOTAL_BAR_LENGTH/2)+2):
+#         sys.stdout.write('\b')
+#     sys.stdout.write(' %d/%d ' % (current+1, total))
 
-    if current < total-1:
-        sys.stdout.write('\r')
-    else:
-        sys.stdout.write('\n')
-    sys.stdout.flush()
+#     if current < total-1:
+#         sys.stdout.write('\r')
+#     else:
+#         sys.stdout.write('\n')
+#     sys.stdout.flush()
 
 def format_time(seconds):
     days = int(seconds / 3600/24)
